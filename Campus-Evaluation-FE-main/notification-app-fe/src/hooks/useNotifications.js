@@ -1,58 +1,61 @@
-import { useState, useEffect, useMemo } from "react";
-import { fetchNotifications } from "../api/notifications";
+import { useState, useEffect, useCallback } from "react";
+import { fetchNotifications, updateViewedStatus } from "../api/notifications";
+import { logUiAction } from "../api/logger";
 
 export function useNotifications(filter = "All", page = 1, perPage = 10) {
-  const [allNotifications, setAllNotifications] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = {
+        limit: perPage,
+        page,
+      };
+      if (filter && filter !== "All") params.notification_type = filter;
+
+      logUiAction && logUiAction("fetch_notifications", params);
+      const res = await fetchNotifications(params);
+      setNotifications(res.notifications ?? []);
+      setTotalPages(res.totalPages ?? 1);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [filter, page, perPage]);
+
   useEffect(() => {
-    let mounted = true;
-    const load = async () => {
-      try {
-        setLoading(true);
-        const data = await fetchNotifications();
-        if (!mounted) return;
-        setAllNotifications(data.notifications ?? []);
-      } catch (err) {
-        if (!mounted) return;
-        setError(err.message || "Something went wrong");
-      } finally {
-        if (!mounted) return;
-        setLoading(false);
-      }
-    };
-
     load();
-    return () => {
-      mounted = false;
-    };
-  }, []);
+  }, [load]);
 
-  const { filtered, totalFiltered, totalPages } = useMemo(() => {
-    const normalizedFilter = (filter || "All").toLowerCase();
-    const filteredList = (allNotifications || []).filter((n) => {
-      if (!normalizedFilter || normalizedFilter === "all") return true;
-      // support different casing/field names from API
-      const t = (n.type || n.Type || "").toString().toLowerCase();
-      return t === normalizedFilter;
-    });
+  const markViewed = useCallback(
+    async (id, viewed = true) => {
+      try {
+        // optimistic update
+        setNotifications((prev) => prev.map((n) => (n.ID === id ? { ...n, viewed } : n)));
+        await updateViewedStatus(id, viewed);
+      } catch (err) {
+        // revert on error: reload
+        load();
+        throw err;
+      }
+    },
+    [load]
+  );
 
-    const totalFiltered = filteredList.length;
-    const totalPages = Math.max(1, Math.ceil(totalFiltered / perPage));
-    return { filtered: filteredList, totalFiltered, totalPages };
-  }, [allNotifications, filter, perPage]);
-
-  const paginated = useMemo(() => {
-    const start = Math.max(0, (page - 1) * perPage);
-    return filtered.slice(start, start + perPage);
-  }, [filtered, page, perPage]);
+  const refresh = useCallback(() => load(), [load]);
 
   return {
-    notifications: paginated,
-    totalFiltered: filtered.length,
+    notifications,
     totalPages,
     loading,
     error,
+    markViewed,
+    refresh,
   };
 }
